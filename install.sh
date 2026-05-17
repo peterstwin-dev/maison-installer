@@ -135,22 +135,23 @@ fi
 # ─── Phase 5: Fork + clone ──────────────────────────────────────────────────
 
 if [ -d "$WORKSPACE_DIR/.git" ]; then
-  ok "Repo already cloned at $WORKSPACE_DIR — syncing fork + pulling from upstream"
-  # Sync the user's fork with upstream (no-op if fork is up to date or doesn't
-  # exist yet on their side), then pull from upstream so the local clone is
-  # caught up even when the user's fork is stale. This avoids the "inner
-  # installer not found" failure when a fork was created before a recent
-  # upstream commit (saw this surface during the first real friend onboarding,
-  # 2026-05-17).
+  echo "Repo at $WORKSPACE_DIR — syncing fork + hard-resetting to upstream main"
+  # Sync the user's fork with upstream. No-op if already in sync.
   gh repo sync "${GH_LOGIN}/maison-simple" --source "$UPSTREAM_REPO" >/dev/null 2>&1 || true
   (
-    cd "$WORKSPACE_DIR"
+    cd "$WORKSPACE_DIR" || exit 4
     # Ensure upstream remote exists (older clones may have only origin).
     git remote get-url upstream >/dev/null 2>&1 || \
-      git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
-    git fetch upstream main 2>/dev/null || true
-    git pull --ff-only upstream main 2>/dev/null || git pull --ff-only 2>/dev/null || true
-  )
+      git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+    git fetch upstream main || { err "git fetch upstream failed — check network"; exit 4; }
+    # Hard-reset to upstream/main. Discards any local changes from prior
+    # partial install attempts (node_modules side effects, half-built artifacts,
+    # etc.). This is a clean-install context — the friend hasn't authored
+    # any local commits worth preserving, and silent fast-forward pulls were
+    # leaving stale code in place when the working tree wasn't clean.
+    git reset --hard upstream/main || { err "git reset --hard failed"; exit 4; }
+  ) || exit 4
+  ok "Local clone hard-reset to upstream/main"
 else
   mkdir -p "$(dirname "$WORKSPACE_DIR")"
   cd "$(dirname "$WORKSPACE_DIR")"
