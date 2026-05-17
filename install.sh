@@ -23,7 +23,11 @@
 # Idempotent: re-running on a populated workspace just pulls the latest
 # inner install.sh and re-executes it.
 
-set -euo pipefail
+# Drop `set -u` deliberately. Apple's bundled bash 3.2 has known quirks with
+# `set -u` interacting with parameter expansions inside heredocs ($UPSTREAM_REPO
+# expansion inside the python -c heredoc trips it on some Macs). The `-u`
+# safety isn't worth the portability cost for a curl|bash installer.
+set -eo pipefail
 
 UPSTREAM_REPO="peterstwin-dev/maison-simple"
 WORKSPACE_DIR="${MAISON_WORKSPACE:-$HOME/Workspace/maison-simple}"
