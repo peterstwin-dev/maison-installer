@@ -140,12 +140,23 @@ if [ -d "$WORKSPACE_DIR/.git" ]; then
 else
   mkdir -p "$(dirname "$WORKSPACE_DIR")"
   cd "$(dirname "$WORKSPACE_DIR")"
-  echo "Forking and cloning $UPSTREAM_REPO…"
-  gh repo fork "$UPSTREAM_REPO" --clone --remote 2>&1 | grep -vE '^!' || true
-  # Fallback if `gh repo fork` clone target naming differs
-  if [ ! -d "$WORKSPACE_DIR/.git" ]; then
-    git clone "git@github.com:${GH_LOGIN}/maison-simple" "$WORKSPACE_DIR"
-  fi
+  echo "Forking $UPSTREAM_REPO and cloning your fork…"
+
+  # 1) Create the fork without cloning. Idempotent — gh just no-ops if the
+  #    fork already exists in your account.
+  gh repo fork "$UPSTREAM_REPO" --clone=false --remote=false >/dev/null 2>&1 || true
+
+  # 2) Clone the fork over HTTPS. Avoids SSH host-key prompts that
+  #    can't be answered when this script is run under `curl | bash` —
+  #    the prompt's stdin is the closed curl pipe, not the user's TTY.
+  #    HTTPS uses the gh-cli's stored credential helper, no key dance.
+  HTTPS_FORK_URL="https://github.com/${GH_LOGIN}/maison-simple.git"
+  git clone "$HTTPS_FORK_URL" "$WORKSPACE_DIR"
+  cd "$WORKSPACE_DIR"
+
+  # 3) Add upstream remote (HTTPS too).
+  git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+
   ok "Cloned to $WORKSPACE_DIR"
 fi
 
