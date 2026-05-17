@@ -135,16 +135,32 @@ fi
 # ─── Phase 5: Fork + clone ──────────────────────────────────────────────────
 
 if [ -d "$WORKSPACE_DIR/.git" ]; then
-  ok "Repo already cloned at $WORKSPACE_DIR — pulling latest"
-  (cd "$WORKSPACE_DIR" && git pull --ff-only 2>/dev/null || true)
+  ok "Repo already cloned at $WORKSPACE_DIR — syncing fork + pulling from upstream"
+  # Sync the user's fork with upstream (no-op if fork is up to date or doesn't
+  # exist yet on their side), then pull from upstream so the local clone is
+  # caught up even when the user's fork is stale. This avoids the "inner
+  # installer not found" failure when a fork was created before a recent
+  # upstream commit (saw this surface during the first real friend onboarding,
+  # 2026-05-17).
+  gh repo sync "${GH_LOGIN}/maison-simple" --source "$UPSTREAM_REPO" >/dev/null 2>&1 || true
+  (
+    cd "$WORKSPACE_DIR"
+    # Ensure upstream remote exists (older clones may have only origin).
+    git remote get-url upstream >/dev/null 2>&1 || \
+      git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+    git fetch upstream main 2>/dev/null || true
+    git pull --ff-only upstream main 2>/dev/null || git pull --ff-only 2>/dev/null || true
+  )
 else
   mkdir -p "$(dirname "$WORKSPACE_DIR")"
   cd "$(dirname "$WORKSPACE_DIR")"
   echo "Forking $UPSTREAM_REPO and cloning your fork…"
 
   # 1) Create the fork without cloning. Idempotent — gh just no-ops if the
-  #    fork already exists in your account.
+  #    fork already exists in your account. If it does already exist, sync
+  #    it with upstream so the friend doesn't end up with a stale fork.
   gh repo fork "$UPSTREAM_REPO" --clone=false --remote=false >/dev/null 2>&1 || true
+  gh repo sync "${GH_LOGIN}/maison-simple" --source "$UPSTREAM_REPO" >/dev/null 2>&1 || true
 
   # 2) Clone the fork over HTTPS. Avoids SSH host-key prompts that
   #    can't be answered when this script is run under `curl | bash` —
