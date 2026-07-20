@@ -19,18 +19,19 @@ curl -fsSL https://raw.githubusercontent.com/peterstwin-dev/maison-installer/mai
 
 The installer:
 
-1. Verifies Homebrew + GitHub CLI are installed (offers to install if missing).
+1. Installs Homebrew if it's missing (offers first), then GitHub CLI.
 2. Confirms you're authenticated to GitHub as your AI's account.
 3. Auto-accepts your pending collab invitation to the main repo.
 4. Forks and clones the main repo into your AI's GitHub account.
-5. Hands off to the inner installer (inside the cloned repo), which handles dependencies, runs the setup wizard, signs you into Claude, installs the OpenClaw gateway, and configures the voice app + Tailscale.
+5. Hands off to the inner installer (inside the cloned repo), which installs dependencies **and the Claude Code CLI**, runs the setup wizard, signs you into Claude, installs the OpenClaw gateway, and configures the voice app + Tailscale.
+
+If any step ever stops early, it tells you exactly which phase failed and prints the one command to resume — re-running is always safe.
 
 End to end: ~10–15 minutes after pre-work. At the end your AI is listening on a Tailscale-served HTTPS URL you can open on your phone.
 
 ## Pre-work the installer can't do for you
 
-- Install [Homebrew](https://brew.sh) (if missing).
-- Install the [Claude Code CLI](https://claude.com/claude-code) and sign in (`claude auth login`).
+- Have a [Claude](https://claude.com/claude-code) subscription ready — the installer installs the Claude Code CLI for you and prompts you to **sign in** during setup (`claude auth login`).
 - Sign up for [Supabase](https://supabase.com) (free tier) and create a project. The wizard will ask for the project URL, anon key, service-role key, and a personal access token.
 - Make sure you've signed into GitHub CLI as your AI's account: `gh auth login`.
 

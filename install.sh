@@ -42,6 +42,47 @@ fi
 ok()   { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
 warn() { printf '%s⚠%s %s\n' "$YELLOW" "$RESET" "$*"; }
 err()  { printf '%s✗%s %s\n' "$RED" "$RESET" "$*" >&2; }
+say()  { printf '%s\n' "$*"; }
+phase() { CURRENT_PHASE="$*"; printf '\n%s═══ %s ═══%s\n' "$BOLD" "$*" "$RESET"; }
+ask()  {
+  local prompt="$1" default="${2:-}" ans
+  # Read from the controlling terminal, not stdin — so prompts still work when
+  # this runs as `curl … | bash` (stdin is the pipe, already at EOF). With no
+  # tty (truly headless), fall back to the default.
+  if [ -r /dev/tty ]; then
+    if [ -n "$default" ]; then read -r -p "$prompt [$default]: " ans < /dev/tty; echo "${ans:-$default}"
+    else read -r -p "$prompt: " ans < /dev/tty; echo "$ans"; fi
+  else
+    echo "$default"
+  fi
+}
+
+# ─── Safety net: always leave a way back on track ───────────────────────────
+#
+# With `set -eo pipefail`, any unexpected failure (network blip, a brew step,
+# a prompt with no input) aborts at a cryptic last line with no map back. This
+# EXIT trap fires on every exit and, on a non-zero code, names the phase that
+# failed and the exact command to resume. Intentional exits that already
+# printed tailored guidance set GUIDED_EXIT=1 to suppress the generic line but
+# still get the resume pointer. The whole wrapper resumes from one command —
+# re-running it is idempotent (it just syncs the clone and re-execs).
+CURRENT_PHASE="startup"
+GUIDED_EXIT=0
+resume_cmd() {
+  printf 'curl -fsSL https://raw.githubusercontent.com/peterstwin-dev/maison-installer/main/install.sh | bash -s -- %s' "${TOKEN:-mb_<your-token>}"
+}
+on_exit() {
+  local code=$?
+  [ "$code" -eq 0 ] && return 0
+  if [ "$GUIDED_EXIT" != "1" ]; then
+    err ""
+    err "${BOLD}Bootstrap stopped during: ${CURRENT_PHASE} (exit $code).${RESET}"
+    err "This is usually transient. Re-running is safe — it picks up where it left off."
+  fi
+  printf '%s\n%s→ To get back on track, re-run:%s\n  %s%s%s\n\n' \
+    "$YELLOW" "$BOLD" "$RESET" "$BOLD" "$(resume_cmd)" "$RESET" >&2
+}
+trap on_exit EXIT
 
 # ─── Banner ─────────────────────────────────────────────────────────────────
 
@@ -58,46 +99,83 @@ BANNER
 
 # ─── Token capture ──────────────────────────────────────────────────────────
 
+phase "Token"
 TOKEN="${1:-${MAISON_BOOTSTRAP_TOKEN:-}}"
 if [ -z "$TOKEN" ]; then
   err "Missing bootstrap token. Usage:"
   err "  curl -fsSL ... | bash -s -- mb_<your-token>"
-  exit 2
+  GUIDED_EXIT=1; exit 2
 fi
 if [[ ! "$TOKEN" =~ ^mb_[A-Za-z0-9_-]+$ ]]; then
   err "Bootstrap token looks malformed — expected mb_<base64url>."
   err "Get a fresh one from the collective operator if yours expired."
-  exit 2
+  GUIDED_EXIT=1; exit 2
 fi
 ok "Bootstrap token captured"
 
 # ─── Phase 1: Homebrew ──────────────────────────────────────────────────────
 
+phase "Phase 1: Homebrew"
 if ! command -v brew >/dev/null 2>&1; then
-  err "Homebrew is required and not installed. Install with:"
-  err "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-  err "Then re-run this script."
-  exit 2
+  # Fresh Macs have no Homebrew. Rather than dead-end here (the wall a new
+  # friend hits first), offer to install it and continue in the same run.
+  # NONINTERACTIVE=1 skips Homebrew's RETURN prompt; sudo still asks for the
+  # Mac password (that's the "log in" — unavoidable).
+  warn "Homebrew isn't installed — it's the foundation everything else needs."
+  ans=$(ask "Install Homebrew now? (Y/n)" "Y")
+  if [[ "$ans" == [Yy]* ]]; then
+    say "Installing Homebrew (it will ask for your Mac password)…"
+    if ! NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
+      err "Homebrew install failed. Install it by hand, then re-run this script:"
+      err "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+      GUIDED_EXIT=1; exit 2
+    fi
+    # Homebrew doesn't put itself on PATH in the current shell — do it now, and
+    # persist for future shells so the inner installer + the user both see it.
+    if [ -x /opt/homebrew/bin/brew ]; then
+      eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [ -x /usr/local/bin/brew ]; then
+      eval "$(/usr/local/bin/brew shellenv)"
+    fi
+    if ! command -v brew >/dev/null 2>&1; then
+      err "Homebrew installed but 'brew' isn't on PATH yet. Open a NEW terminal and re-run:"
+      err "  $(resume_cmd)"
+      GUIDED_EXIT=1; exit 2
+    fi
+    BREW_BIN="$(command -v brew)"
+    for rc in "$HOME/.zprofile" "$HOME/.bash_profile"; do
+      grep -qsF 'brew shellenv' "$rc" 2>/dev/null || printf '\neval "$(%s shellenv)"\n' "$BREW_BIN" >> "$rc"
+    done
+    ok "Homebrew installed and added to PATH"
+  else
+    err "Homebrew is required. Install it, then re-run:"
+    err "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+    err "  then: $(resume_cmd)"
+    GUIDED_EXIT=1; exit 2
+  fi
+else
+  ok "Homebrew present"
 fi
-ok "Homebrew present"
 
 # ─── Phase 2: GitHub CLI ────────────────────────────────────────────────────
 
+phase "Phase 2: GitHub CLI"
 if ! command -v gh >/dev/null 2>&1; then
   warn "GitHub CLI not installed."
-  read -r -p "Install via brew now? (Y/n) [Y]: " ans
-  ans="${ans:-Y}"
-  if [[ "${ans,,}" =~ ^(y|yes)$ ]]; then
+  ans=$(ask "Install via brew now? (Y/n)" "Y")
+  # Apple's bash 3.2 has no ${var,,} lowercase expansion — use a glob match.
+  if [[ "$ans" == [Yy]* ]]; then
     brew install gh
   else
     err "Cannot proceed without gh CLI."
-    exit 2
+    GUIDED_EXIT=1; exit 2
   fi
 fi
 ok "GitHub CLI present"
 
 # ─── Phase 3: GitHub auth ───────────────────────────────────────────────────
 
+phase "Phase 3: GitHub auth"
 if ! gh auth status >/dev/null 2>&1; then
   err "GitHub CLI not authenticated."
   err ""
@@ -110,30 +188,29 @@ if ! gh auth status >/dev/null 2>&1; then
   err "  • Sign in as your AI's GitHub account (NOT your personal one)"
   err ""
   err "Then re-run this script."
-  exit 2
+  GUIDED_EXIT=1; exit 2
 fi
 GH_LOGIN=$(gh api user -q .login 2>/dev/null)
 ok "GitHub CLI authenticated as ${BOLD}${GH_LOGIN}${RESET}"
 
 # ─── Phase 4: Auto-accept any pending invitations ───────────────────────────
 
-PENDING=$(gh api /user/repository_invitations 2>/dev/null | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for inv in data:
-    full = inv.get('repository', {}).get('full_name', '')
-    if full == '$UPSTREAM_REPO':
-        print(inv['id'])
-        break
-" 2>/dev/null || true)
+phase "Phase 4: Accepting invitation"
+# Use gh's built-in jq (--jq) instead of shelling out to python3 — a fresh Mac
+# may not have python3 on PATH, and invoking it can pop the Xcode CLT installer.
+PENDING=$(gh api /user/repository_invitations \
+  --jq ".[] | select(.repository.full_name == \"$UPSTREAM_REPO\") | .id" 2>/dev/null | head -1 || true)
 if [ -n "$PENDING" ]; then
   gh api -X PATCH "/user/repository_invitations/$PENDING" >/dev/null 2>&1 && \
     ok "Accepted pending invitation to $UPSTREAM_REPO" || \
     warn "Tried to accept invitation $PENDING but got an error; check manually"
+else
+  ok "No pending invitation to accept (already a collaborator, or invite already used)"
 fi
 
 # ─── Phase 5: Fork + clone ──────────────────────────────────────────────────
 
+phase "Phase 5: Fork + clone"
 if [ -d "$WORKSPACE_DIR/.git" ]; then
   echo "Repo at $WORKSPACE_DIR — syncing fork + hard-resetting to upstream main"
   # Sync the user's fork with upstream. No-op if already in sync.
@@ -150,7 +227,7 @@ if [ -d "$WORKSPACE_DIR/.git" ]; then
     # any local commits worth preserving, and silent fast-forward pulls were
     # leaving stale code in place when the working tree wasn't clean.
     git reset --hard upstream/main || { err "git reset --hard failed"; exit 4; }
-  ) || exit 4
+  ) || { GUIDED_EXIT=1; exit 4; }
   ok "Local clone hard-reset to upstream/main"
 else
   mkdir -p "$(dirname "$WORKSPACE_DIR")"
@@ -179,12 +256,13 @@ fi
 
 # ─── Phase 6: Hand off to the inner installer ───────────────────────────────
 
+phase "Phase 6: Hand off"
 INNER="$WORKSPACE_DIR/install.sh"
 if [ ! -f "$INNER" ]; then
   err "Inner installer not found at $INNER"
   err "Your fork may be out of date. Try:"
   err "  cd $WORKSPACE_DIR && git pull upstream main"
-  exit 3
+  GUIDED_EXIT=1; exit 3
 fi
 
 printf '\n%s═══ Handing off to the full installer ═══%s\n\n' "$BOLD" "$RESET"
