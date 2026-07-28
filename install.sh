@@ -232,26 +232,57 @@ if [ -d "$WORKSPACE_DIR/.git" ]; then
 else
   mkdir -p "$(dirname "$WORKSPACE_DIR")"
   cd "$(dirname "$WORKSPACE_DIR")"
-  echo "Forking $UPSTREAM_REPO and cloning your fork…"
+  echo "Setting up your copy of $UPSTREAM_REPO…"
 
-  # 1) Create the fork without cloning. Idempotent — gh just no-ops if the
-  #    fork already exists in your account. If it does already exist, sync
-  #    it with upstream so the friend doesn't end up with a stale fork.
-  gh repo fork "$UPSTREAM_REPO" --clone=false --remote=false >/dev/null 2>&1 || true
-  gh repo sync "${GH_LOGIN}/maison-simple" --source "$UPSTREAM_REPO" >/dev/null 2>&1 || true
+  # A personal fork is nice-to-have (it lets you push your own changes), but
+  # forking a PRIVATE repo is flaky and eventually-consistent: the fork can
+  # take several seconds to appear, or fail outright right after collaborator
+  # access is granted. The old code created the fork with all output/errors
+  # suppressed, then immediately cloned it — so a fork that hadn't been created
+  # produced a baffling "Repository not found" on the clone (exit 128).
+  #
+  # New approach: attempt the fork, POLL for it to actually exist, and if it
+  # never shows up, fall back to cloning upstream directly. You're a
+  # collaborator, so you have read access either way and your node works the
+  # same. All clones use HTTPS (gh-cli credential helper) to avoid SSH host-key
+  # prompts that can't be answered under `curl | bash` (stdin is the closed pipe).
+  FORK="${GH_LOGIN}/maison-simple"
+  HTTPS_FORK_URL="https://github.com/${FORK}.git"
+  HTTPS_UPSTREAM_URL="https://github.com/${UPSTREAM_REPO}.git"
 
-  # 2) Clone the fork over HTTPS. Avoids SSH host-key prompts that
-  #    can't be answered when this script is run under `curl | bash` —
-  #    the prompt's stdin is the closed curl pipe, not the user's TTY.
-  #    HTTPS uses the gh-cli's stored credential helper, no key dance.
-  HTTPS_FORK_URL="https://github.com/${GH_LOGIN}/maison-simple.git"
-  git clone "$HTTPS_FORK_URL" "$WORKSPACE_DIR"
-  cd "$WORKSPACE_DIR"
+  # 1) Best-effort fork creation. Errors are shown (not swallowed) but never fatal.
+  gh repo fork "$UPSTREAM_REPO" --clone=false --remote=false 2>&1 | grep -vE '^!' || true
 
-  # 3) Add upstream remote (HTTPS too).
-  git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+  # 2) Poll up to ~30s for the fork to actually exist (creation is async).
+  FORK_READY=0
+  for _ in $(seq 1 15); do
+    if gh repo view "$FORK" >/dev/null 2>&1; then FORK_READY=1; break; fi
+    sleep 2
+  done
 
-  ok "Cloned to $WORKSPACE_DIR"
+  # 3) Clone the fork if it materialized; otherwise clone upstream directly.
+  if [ "$FORK_READY" = "1" ]; then
+    gh repo sync "$FORK" --source "$UPSTREAM_REPO" >/dev/null 2>&1 || true
+    echo "Cloning your fork…"
+    if git clone "$HTTPS_FORK_URL" "$WORKSPACE_DIR"; then
+      cd "$WORKSPACE_DIR"
+      git remote add upstream "$HTTPS_UPSTREAM_URL" 2>/dev/null || true
+      ok "Cloned your fork to $WORKSPACE_DIR"
+    else
+      warn "Fork clone failed — falling back to a direct upstream clone."
+      FORK_READY=0
+    fi
+  fi
+
+  if [ "$FORK_READY" != "1" ]; then
+    warn "No personal fork available (private-repo forks are flaky) — cloning upstream directly. Your node works the same; you can fork later to contribute changes."
+    rm -rf "$WORKSPACE_DIR"   # clear any partial dir from a failed fork clone
+    echo "Cloning $UPSTREAM_REPO…"
+    git clone "$HTTPS_UPSTREAM_URL" "$WORKSPACE_DIR"
+    cd "$WORKSPACE_DIR"
+    git remote add upstream "$HTTPS_UPSTREAM_URL" 2>/dev/null || true
+    ok "Cloned upstream to $WORKSPACE_DIR"
+  fi
 fi
 
 # ─── Phase 6: Hand off to the inner installer ───────────────────────────────
