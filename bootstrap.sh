@@ -30,8 +30,13 @@ RESUME='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/peterstwin-
 
 if [ -t 1 ]; then
   BOLD=$'\033[1m' DIM=$'\033[2m' GREEN=$'\033[32m' YELLOW=$'\033[33m' RED=$'\033[31m' RESET=$'\033[0m'
+  # Maison violet (#6A5CFF): exact on 24-bit terminals, else the nearest 256-color (Terminal.app).
+  case "${COLORTERM:-}" in
+    truecolor|24bit) VIOLET=$'\033[38;2;106;92;255m' ;;
+    *)               VIOLET=$'\033[38;5;98m' ;;
+  esac
 else
-  BOLD='' DIM='' GREEN='' YELLOW='' RED='' RESET=''
+  BOLD='' DIM='' GREEN='' YELLOW='' RED='' RESET='' VIOLET=''
 fi
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
@@ -72,7 +77,8 @@ fi
 
 cat <<INTRO
 
-${BOLD}Maison: setting up this Mac${RESET}
+${BOLD}${VIOLET}◆ Maison${RESET} ${DIM}Initiative${RESET}
+${BOLD}Setting up this Mac${RESET}
 
 This Terminal window does the part that has to happen before Maison can run:
   1. Asks for your Mac password once, to install Apple's developer tools and
@@ -168,8 +174,11 @@ done
 
 # ─── 5. Download ────────────────────────────────────────────────────────────
 if [ -d "$WORKSPACE/.git" ]; then
+  # 🩸 Put back the files a build stamps and `pnpm install` rewrites (scripts/collective/build-artifacts.ts
+  # REVERT_BEFORE_PULL, the same list the nightly updater reverts). Upstream changes them on every ship, so a
+  # second run of this command after a first build could not fast-forward and silently kept the old code.
   ok "Maison is already downloaded at $WORKSPACE"
-  (cd "$WORKSPACE" && git pull --ff-only >/dev/null 2>&1) \
+  (cd "$WORKSPACE" && for f in app/pnpm-lock.yaml app/package-lock.json scripts/package-lock.json app/src/lib/version.ts app/public/sw.js; do git checkout -- "$f" >/dev/null 2>&1 || true; done; git pull --ff-only >/dev/null 2>&1) \
     || warn "Could not update the download (offline, or local changes). Continuing with it as it is."
 else
   mkdir -p "$(dirname "$WORKSPACE")"
