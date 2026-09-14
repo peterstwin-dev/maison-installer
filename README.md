@@ -22,7 +22,7 @@ That's the whole command — no token to paste in, no flags. It:
 2. Signs you in to GitHub in your browser and accepts your pending invitation.
 3. Downloads Maison to `~/Workspace/maison-simple` (or updates it).
 4. Installs dependencies and builds the app.
-5. Opens a setup page in your browser, which walks you through the rest — your invite code, your Claude sign-in, and your accounts below — and finishes by starting your AI.
+5. Opens a setup page in your browser, which walks you through the rest — the Node License Agreement, your invite code, your Claude sign-in, and your accounts below — and finishes by starting your AI.
 
 If anything stops early, it prints the exact command to resume. Re-running is always safe.
 
@@ -32,6 +32,7 @@ Terminal takes about 20–40 minutes (mostly downloading and building). The setu
 
 Have these ready before you start:
 
+- Time to read the Node License Agreement and the Terms of Use, which you sign with your full legal name before this Mac registers
 - Your invite code
 - A [Claude](https://claude.com/claude-code) account (Pro or Max plan) — the setup page signs you in
 - A [Supabase](https://supabase.com) account (free tier) — no need to create a project yourself, the setup page does it
@@ -43,10 +44,10 @@ Have these ready before you start:
 
 Older invites and emails may reference `install.sh` instead of `bootstrap.sh`. That file still works — it hands off to `bootstrap.sh` automatically — but new invites use `bootstrap.sh` directly, so that's the command above.
 
-## Operator's access
+## The Node License Agreement
 
-By accepting the terms during setup, you consent to the collective operator having super-admin read access to your cognitive Supabase project for debugging, trust/safety, and federation health checks. Every operator action is logged in your own `super_admin_access_log` table — auditable any time. Revocable by deleting one Auth user from your Supabase project (`super-admin@maison-collective.internal`).
+Maison is proprietary software owned by Maison Initiative, PBC. Before a Mac registers as a node, its owner reads and accepts the Node License Agreement, which includes the Terms of Use, and signs it with their full legal name. The agreement covers ownership of the software, the license to run it on one node, automatic updates, license verification and remote deactivation, and administrative access by the super admin (every such action is logged on the node). A copy of exactly what was accepted is saved on the Mac, and the acceptance is recorded with Maison Initiative.
 
 ## License
 
-MIT — see `LICENSE`.
+The installer scripts in this repository are under the MIT license (see `LICENSE`). Maison itself is not open source: it is licensed only under the Node License Agreement.
