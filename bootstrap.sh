@@ -173,13 +173,65 @@ for id in $(gh api user/repository_invitations --jq ".[] | select(.repository.fu
 done
 
 # ─── 5. Download ────────────────────────────────────────────────────────────
+# Maison's latest commit is fetched straight from the Maison repo (not the checkout's own remote, which on
+# an older install can be a stale fork), so "up to date" means the code a helper just shipped.
+# stale_download <latest-commit> <what git said>: explain what blocks the update and the safe way out.
+stale_download() {
+  local latest="$1" said="$2" here dirty n
+  here="$(git rev-parse --short HEAD)"
+  err "Maison could not update. This Mac still has older code ($here; the latest is $(git rev-parse --short "$latest"))."
+  err "Setup stopped here so it does not rebuild the old version."
+  err ""
+  if [ -n "$said" ]; then
+    err "Git said:"
+    printf '%s\n' "$said" | sed -n '1,15p' | sed 's/^/    /' >&2
+    err ""
+  fi
+  dirty="$(git status --porcelain --untracked-files=no)"
+  if [ -n "$dirty" ]; then
+    n="$(printf '%s\n' "$dirty" | wc -l | tr -d ' ')"
+    err "These Maison files were changed on this Mac, which keeps the update from applying:"
+    printf '%s\n' "$dirty" | sed -n '1,15p' | sed 's/^/    /' >&2
+    [ "$n" -gt 15 ] && err "    …and $((n - 15)) more"
+    err ""
+    err "To set those changes aside (they are kept, not deleted) and update, run:"
+    err "  cd $WORKSPACE && git stash push -m \"before update $(date +%Y-%m-%d)\""
+  elif ! git merge-base --is-ancestor HEAD "$latest" 2>/dev/null; then
+    err "This Mac's copy has its own saved commits that the latest Maison does not have."
+    err "To keep them on a backup branch and move to the latest Maison, run:"
+    err "  cd $WORKSPACE && git branch maison-backup-$(date +%Y%m%d-%H%M%S) && git reset --hard $latest"
+  else
+    err "Send this message to whoever invited you. They can tell you what to change."
+  fi
+  err ""
+  fail "Maison did not update."
+}
+
 if [ -d "$WORKSPACE/.git" ]; then
+  ok "Maison is already downloaded at $WORKSPACE. Checking for updates…"
+  cd "$WORKSPACE"
+  BEFORE="$(git rev-parse --short HEAD 2>/dev/null || true)"
   # 🩸 Put back the files a build stamps and `pnpm install` rewrites (scripts/collective/build-artifacts.ts
   # REVERT_BEFORE_PULL, the same list the nightly updater reverts). Upstream changes them on every ship, so a
   # second run of this command after a first build could not fast-forward and silently kept the old code.
-  ok "Maison is already downloaded at $WORKSPACE"
-  (cd "$WORKSPACE" && for f in app/pnpm-lock.yaml app/package-lock.json scripts/package-lock.json app/src/lib/version.ts app/public/sw.js; do git checkout -- "$f" >/dev/null 2>&1 || true; done; git pull --ff-only >/dev/null 2>&1) \
-    || warn "Could not update the download (offline, or local changes). Continuing with it as it is."
+  for f in app/pnpm-lock.yaml app/package-lock.json scripts/package-lock.json app/src/lib/version.ts app/public/sw.js; do git checkout -- "$f" >/dev/null 2>&1 || true; done
+  GIT_TERMINAL_PROMPT=0 git pull --ff-only >/dev/null 2>&1 || true   # the checkout's own remote; the check below is what decides
+  # 🩸 2026-09-14 (Rome): a failed pull used to print a warning and carry on, so a friend asked to update
+  # rebuilt the OLD code and nobody could tell. Now: behind the latest Maison and unable to catch up = stop.
+  if ! GIT_TERMINAL_PROMPT=0 git fetch --quiet "$UPSTREAM_HTTPS" HEAD 2>/dev/null; then
+    warn "Could not reach GitHub to check for updates (offline?). Continuing, but this copy of Maison may be out of date."
+  else
+    LATEST="$(git rev-parse FETCH_HEAD)"
+    if ! git merge-base --is-ancestor "$LATEST" HEAD 2>/dev/null; then
+      MERGE_SAID=""
+      if git merge-base --is-ancestor HEAD "$LATEST" 2>/dev/null; then
+        MERGE_SAID="$(git merge --ff-only "$LATEST" 2>&1)" || true
+      fi
+      git merge-base --is-ancestor "$LATEST" HEAD 2>/dev/null || stale_download "$LATEST" "$MERGE_SAID"
+    fi
+    if [ "$(git rev-parse --short HEAD)" != "$BEFORE" ]; then ok "Updated Maison (it was at $BEFORE)"; fi
+    ok "Up to date with the latest Maison"
+  fi
 else
   mkdir -p "$(dirname "$WORKSPACE")"
   say "Downloading Maison to $WORKSPACE…"
@@ -187,6 +239,7 @@ else
     || fail "Could not download Maison. If you just accepted your GitHub invitation, wait a minute. Otherwise ask whoever invited you to check that your GitHub account was invited."
 fi
 [ -f "$WORKSPACE/install.sh" ] || fail "The download at $WORKSPACE has no install.sh."
+ok "Maison is at $(git -C "$WORKSPACE" rev-parse --short HEAD)"
 
 # ─── 6. Hand over to install.sh ─────────────────────────────────────────────
 # The token travels in the environment (never argv, never printed); install.sh stores it 0600.
