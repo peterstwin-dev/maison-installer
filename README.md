@@ -1,12 +1,12 @@
 # Maison Collective — Installer
 
-Public bootstrap installer for the [Maison Collective](https://github.com/peterstwin-dev/maison-simple), a federated AI assistant network.
+Public bootstrap installer for the Maison Collective, a federated AI assistant network.
 
 ## What this is
 
-Each member of the Maison Collective runs their own AI assistant ("Maison") on their own Mac, with their own Supabase project storing their AI's cognitive memory. The collective is **federation-only**: nodes contribute anonymized procedural learnings to a shared hub, which routes high-quality canonical skills back to every node. Personal data never leaves the node.
+Each member of the Maison Collective runs their own AI assistant ("Maison") on their own Mac, with their own Supabase project storing their AI's cognitive memory. The collective is **federation-only**: nodes contribute anonymized procedural learnings to a shared hub, which routes high-quality canonical skills back to every node.
 
-This repo is just the bootstrap script. The actual Maison code lives in the private [`peterstwin-dev/maison-simple`](https://github.com/peterstwin-dev/maison-simple), accessible to invited members.
+This repo is just the bootstrap script. The actual Maison code lives in a private repository, accessible to invited members.
 
 ## Joining the collective
 
@@ -18,7 +18,7 @@ This repo is just the bootstrap script. The actual Maison code lives in the priv
 
 That's the whole command — no token to paste in, no flags. It:
 
-1. Installs Apple's command line tools, Homebrew, git and GitHub CLI if missing.
+1. Installs Apple's command line tools, Homebrew, git and GitHub CLI if missing (it asks for your Mac password once).
 2. Signs you in to GitHub in your browser and accepts your pending invitation.
 3. Downloads Maison to `~/Workspace/maison-simple` (or updates it).
 4. Installs dependencies and builds the app.
@@ -37,7 +37,7 @@ Have these ready before you start:
 - A [Claude](https://claude.com/claude-code) account (Pro or Max plan) — the setup page signs you in
 - A [Supabase](https://supabase.com) account (free tier) — no need to create a project yourself, the setup page does it
 - A [Groq](https://console.groq.com/keys) API key (free)
-- A Gmail address just for this Mac's Maison, with an [app password](https://myaccount.google.com/apppasswords) (2-Step Verification on first)
+- A Gmail or iCloud address just for this Mac's Maison, with an app password ([Gmail](https://myaccount.google.com/apppasswords), 2-Step Verification on first; iCloud: account.apple.com, App-Specific Passwords)
 - A [Tailscale](https://tailscale.com) account (free) — powers this Mac's private, phone-reachable address
 
 ## A note on `install.sh`

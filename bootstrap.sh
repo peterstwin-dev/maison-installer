@@ -3,12 +3,20 @@
 #
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/peterstwin-dev/maison-installer/main/bootstrap.sh)"
 #
-# Old form, still accepted (the token is stored for the setup page and never printed):
+# If you have an invite token, pass it the SAFE way — off the command line, so it is not in `ps`:
+#   MAISON_BOOTSTRAP_TOKEN_FILE=/path/to/token-file  (a 0600 file; most private — not inherited either)
+#   MAISON_BOOTSTRAP_TOKEN=mb_<token> /bin/bash -c "$(curl -fsSL …/bootstrap.sh)"
+# Old form, still accepted for links already sent (the token is stored for the setup page and never
+# printed), but it rides argv and is visible in `ps` while this runs — prefer one of the two above:
 #   curl -fsSL https://raw.githubusercontent.com/peterstwin-dev/maison-installer/main/bootstrap.sh | bash -s -- mb_<token>
 #
-# Lives in maison-simple (installer/bootstrap.sh) and is PUBLISHED, unchanged, to the public
-# peterstwin-dev/maison-installer repo, because maison-simple is private and a fresh Mac cannot read
-# it until GitHub sign-in. It holds no secrets.
+# Lives in the Maison source (installer/bootstrap.sh) and is published to the public
+# peterstwin-dev/maison-installer repo, because the source is private and a fresh Mac cannot read
+# it until GitHub sign-in. It holds no secrets. Nothing publishes it by itself, so the public copy
+# can be behind this one (on 2026-10-05 it was: no token file, no iCloud line; on 2026-10-06 it
+# still downloaded from the repository the source had left). To see the difference:
+#   curl -fsSL https://raw.githubusercontent.com/peterstwin-dev/maison-installer/main/bootstrap.sh | diff - installer/bootstrap.sh
+# To publish it, checked first (a dry run unless told to push): bash scripts/ops/publish-bootstrap.sh
 #
 # What it does, and only this:
 #   1. checks this is a Mac;
@@ -23,7 +31,10 @@
 
 set -eo pipefail
 
-UPSTREAM_REPO="peterstwin-dev/maison-simple"
+# The source repository. Written out because this file is published on its own and runs before
+# there is a checkout; scripts/test/source-repo-one-place.test.sh fails if it differs from
+# config/source-repo.txt. Change it with: bash scripts/ops/set-source-repo.sh <owner/name>
+UPSTREAM_REPO="Maison-Initiative/maison-source"
 UPSTREAM_HTTPS="https://github.com/${UPSTREAM_REPO}.git"
 WORKSPACE="${MAISON_WORKSPACE:-$HOME/Workspace/maison-simple}"
 RESUME='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/peterstwin-dev/maison-installer/main/bootstrap.sh)"'
@@ -48,7 +59,13 @@ fail() { err "$@"; err "When that is fixed, run the same command again:"; err " 
 have_tty() { { exec 9<>/dev/tty; } 2>/dev/null && { exec 9<&-; return 0; }; return 1; }
 
 # ─── Arguments: an optional old-style token, plus flags passed through to install.sh ──
+# The token, safest first: a 0600 file (not in `ps`, not inherited by children), then the environment
+# variable (not on the command line), then a trailing mb_… argument (the old form, visible in `ps`).
 TOKEN="${MAISON_BOOTSTRAP_TOKEN:-}"
+if [ -z "$TOKEN" ] && [ -n "${MAISON_BOOTSTRAP_TOKEN_FILE:-}" ] && [ -f "$MAISON_BOOTSTRAP_TOKEN_FILE" ]; then
+  TOKEN="$(tr -d '[:space:]' < "$MAISON_BOOTSTRAP_TOKEN_FILE" 2>/dev/null || true)"
+fi
+unset MAISON_BOOTSTRAP_TOKEN_FILE
 PASS_ARGS=()
 for a in "$@"; do
   case "$a" in
@@ -96,8 +113,9 @@ these ready:
   • Your Claude account (claude.ai, Pro or Max plan)
   • A Supabase account (free): https://supabase.com
   • A Groq API key (free): https://console.groq.com/keys
-  • A Gmail address just for this Mac's Maison, with an app password
-    (2-Step Verification on, then https://myaccount.google.com/apppasswords)
+  • A Gmail or iCloud address just for this Mac's Maison, with an app password
+    (Gmail: https://myaccount.google.com/apppasswords
+     iCloud: https://account.apple.com → App-Specific Passwords)
   • A Tailscale account (free): https://tailscale.com
 
 INTRO
@@ -216,13 +234,26 @@ if [ -d "$WORKSPACE/.git" ]; then
   # second run of this command after a first build could not fast-forward and silently kept the old code.
   for f in app/pnpm-lock.yaml app/package-lock.json scripts/package-lock.json app/src/lib/version.ts app/public/sw.js; do git checkout -- "$f" >/dev/null 2>&1 || true; done
   GIT_TERMINAL_PROMPT=0 git pull --ff-only >/dev/null 2>&1 || true   # the checkout's own remote; the check below is what decides
-  # 🩸 2026-09-14 (Rome): a failed pull used to print a warning and carry on, so a friend asked to update
+  # 🩸 2026-09-14 (Oslo): a failed pull used to print a warning and carry on, so a friend asked to update
   # rebuilt the OLD code and nobody could tell. Now: behind the latest Maison and unable to catch up = stop.
   if ! GIT_TERMINAL_PROMPT=0 git fetch --quiet "$UPSTREAM_HTTPS" HEAD 2>/dev/null; then
-    warn "Could not reach GitHub to check for updates (offline?). Continuing, but this copy of Maison may be out of date."
+    warn "Could not check GitHub for updates (offline, or this GitHub account has not been invited to"
+    warn "the current Maison source). Continuing, but this copy of Maison may be out of date."
   else
     LATEST="$(git rev-parse FETCH_HEAD)"
-    if ! git merge-base --is-ancestor "$LATEST" HEAD 2>/dev/null; then
+    # 🩸 2026-10-06: Maison's source moved to another repository, with a history that starts over.
+    # A Mac installed before the move shares no commit with it. This used to read as "this Mac has
+    # its own saved commits" and tell the owner to `git reset --hard` onto the new history: a jump
+    # around the one-time move, which has its own checks and its own undo and is done with whoever
+    # invited them (docs/moving-your-node-to-the-new-source.md in the download). So: say what it
+    # is, change nothing, and carry on with the Maison this Mac has, which still updates itself
+    # from the source it follows.
+    if [ -z "$(git merge-base HEAD "$LATEST" 2>/dev/null)" ]; then
+      warn "This Mac's Maison follows Maison's earlier source. Moving it to the current one is a"
+      warn "separate, one-time step you do together with whoever invited you. Your Maison and your work"
+      warn "are as they were."
+      ok "Continuing with the Maison already on this Mac"
+    elif ! git merge-base --is-ancestor "$LATEST" HEAD 2>/dev/null; then
       MERGE_SAID=""
       if git merge-base --is-ancestor HEAD "$LATEST" 2>/dev/null; then
         MERGE_SAID="$(git merge --ff-only "$LATEST" 2>&1)" || true
@@ -230,7 +261,7 @@ if [ -d "$WORKSPACE/.git" ]; then
       git merge-base --is-ancestor "$LATEST" HEAD 2>/dev/null || stale_download "$LATEST" "$MERGE_SAID"
     fi
     if [ "$(git rev-parse --short HEAD)" != "$BEFORE" ]; then ok "Updated Maison (it was at $BEFORE)"; fi
-    ok "Up to date with the latest Maison"
+    if git merge-base --is-ancestor "$LATEST" HEAD 2>/dev/null; then ok "Up to date with the latest Maison"; fi
   fi
 else
   mkdir -p "$(dirname "$WORKSPACE")"
