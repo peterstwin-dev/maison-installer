@@ -23,7 +23,9 @@
 #   2. asks for the Mac password once (the sudo session is reused by install.sh for Homebrew, the
 #      Tailscale app and the never-sleep setting);
 #   3. installs Apple's command line tools, Homebrew, git and gh if missing;
-#   4. signs in to GitHub in the browser (`gh auth login --web`) and accepts the repo invitation;
+#   4. signs in to GitHub in the browser (`gh auth login --web`) and accepts the repo invitation.
+#      Where the hub says installing with an invite code is switched on, a person who is not
+#      signed in to GitHub gives their invite code instead and needs no GitHub account;
 #   5. downloads Maison to ~/Workspace/maison-simple (or updates it);
 #   6. runs install.sh from the download, which builds and starts the app and opens the setup page.
 #
@@ -79,6 +81,72 @@ if [ -n "$TOKEN" ] && [[ ! "$TOKEN" =~ ^mb_[A-Za-z0-9_-]+$ ]]; then
 fi
 unset MAISON_BOOTSTRAP_TOKEN
 
+# >>> source-pass (the same text in installer/bootstrap.sh and install.sh: scripts/test/install-with-a-code.test.sh fails when the two differ)
+# Installing with an invite code and no GitHub account (2026-10-06). The hub swaps a live invite
+# code for a pass: read-only, for Maison's source and nothing else, good for about an hour. git is
+# given the pass for one command, in that command's environment. It is never written to a file, to
+# the download's saved address, to a command line or to the screen, and this shell forgets it as
+# soon as the download is done.
+#
+# OFF UNLESS THE HUB SAYS IT IS ON. source_pass_available asks the hub, sending nothing. While the
+# hub answers anything but "available", nothing below it runs and the install is the GitHub
+# sign-in and invitation it has always been.
+SOURCE_PASS_HUB="${MAISON_MOTHERSHIP_URL:-https://rotovbkrljkumnveyvav.supabase.co}"
+SOURCE_PASS=""        # the pass, in this shell's memory only: never exported
+SOURCE_PASS_SAID=""   # the hub's own words when it says no
+
+source_pass_available() {
+  local said
+  said="$(curl -fsS --max-time 10 "$SOURCE_PASS_HUB/functions/v1/source-pass" 2>/dev/null)" || return 1
+  case "$said" in *'"available":true'*) return 0 ;; esac
+  return 1
+}
+
+# source_pass_request <invite code>: 0 = SOURCE_PASS is set; 1 = the hub said no (SOURCE_PASS_SAID
+# has its words); 2 = the hub could not be asked, or its answer was not a pass for this repository.
+source_pass_request() {
+  local code="$1" said status body
+  SOURCE_PASS=""; SOURCE_PASS_SAID=""
+  # The code reaches curl on its standard input, as a settings line, so it is on no command line.
+  said="$(printf 'header = "Authorization: Bearer %s"\n' "$code" | curl -sS --max-time 30 -K - \
+    -H 'Content-Type: application/json' -d "{\"mode\":\"install\",\"repo\":\"$UPSTREAM_REPO\"}" \
+    -w '\n%{http_code}' "$SOURCE_PASS_HUB/functions/v1/source-pass" 2>/dev/null)" || return 2
+  status="${said##*$'\n'}"; body="${said%$'\n'*}"
+  if [ "$status" = 200 ]; then
+    # Only a pass the hub says is for the repository about to be downloaded.
+    case "$body" in
+      *"\"repo\":\"$UPSTREAM_REPO\""*) SOURCE_PASS="$(printf '%s' "$body" | sed -n 's/.*"pass":"\([A-Za-z0-9_.-]\{20,\}\)".*/\1/p')" ;;
+    esac
+    # GitHub hands out two formats: a short one and, since 2026-04, one of about 520 characters
+    # with dots and dashes in it. sed cannot count past 255, so the upper bound is checked here.
+    [ "${#SOURCE_PASS}" -le 2048 ] || SOURCE_PASS=""
+    [ -n "$SOURCE_PASS" ] && return 0
+    return 2
+  fi
+  case "$status" in
+    401|403|409|429) SOURCE_PASS_SAID="$(printf '%s' "$body" | sed -n 's/.*"error":"\([^"\\]*\)".*/\1/p')"; return 1 ;;
+  esac
+  return 2
+}
+
+# git_with_source_pass <git arguments…>: one git command that carries the pass. The settings ride
+# in that command's environment (not `-c`, which would be a command line, and not a file). The
+# pass is attached to requests for the source repository's own address and to no other, so a
+# rewrite of that address in someone's git settings sends it nowhere. No saved sign-in is consulted
+# or written, git follows no redirect with the pass in hand, and no hook runs (a hook would be
+# handed the same environment).
+git_with_source_pass() {
+  local basic
+  basic="$(printf 'x-access-token:%s' "$SOURCE_PASS" | base64 | tr -d '\n')"
+  GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=4 \
+    GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
+    GIT_CONFIG_KEY_1="http.$UPSTREAM_HTTPS.extraHeader" GIT_CONFIG_VALUE_1="Authorization: Basic $basic" \
+    GIT_CONFIG_KEY_2=http.followRedirects GIT_CONFIG_VALUE_2=false \
+    GIT_CONFIG_KEY_3=core.hooksPath GIT_CONFIG_VALUE_3=/dev/null \
+    git "$@"
+}
+# <<< source-pass
+
 cleanup() { if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; }
 trap cleanup EXIT
 
@@ -92,6 +160,11 @@ if [ "$(uname -m)" != "arm64" ]; then
   warn "setup will continue, but voice and memory will be slow or unavailable."
 fi
 
+# Asked once, before the first screen, so the screen says what will really happen.
+CODE_ROUTE=0
+INTRO_DOWNLOAD="Signs you in to GitHub and downloads Maison"
+if source_pass_available; then CODE_ROUTE=1; INTRO_DOWNLOAD="Downloads Maison (with your invite code, or a GitHub sign-in)"; fi
+
 cat <<INTRO
 
 ${BOLD}${VIOLET}◆ Maison${RESET} ${DIM}Initiative${RESET}
@@ -100,7 +173,7 @@ ${BOLD}Setting up this Mac${RESET}
 This Terminal window does the part that has to happen before Maison can run:
   1. Asks for your Mac password once, to install Apple's developer tools and
      Homebrew and to keep this Mac from sleeping
-  2. Signs you in to GitHub and downloads Maison
+  2. ${INTRO_DOWNLOAD}
   3. Installs what Maison needs and builds the app
   4. Opens a setup page in your web browser
 
@@ -175,8 +248,47 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 ok "git and gh ready"
 
-# ─── 4. GitHub sign-in ──────────────────────────────────────────────────────
-if gh auth status >/dev/null 2>&1; then
+# ─── 4. An invite code (where the hub offers it), or GitHub sign-in ─────────
+# The code route is for a person who is not signed in to GitHub. Someone already signed in was
+# invited there and carries on as before; so does everyone while the hub does not offer the route.
+if [ "$CODE_ROUTE" = 1 ] && gh auth status >/dev/null 2>&1; then CODE_ROUTE=0; fi
+if [ "$CODE_ROUTE" = 1 ] && [ -z "$TOKEN" ] && [ ! -d "$WORKSPACE/.git" ] && have_tty; then
+  say "Paste your invite code (it starts with mb_) and press Enter."
+  say "${DIM}If you were invited on GitHub instead, just press Enter.${RESET}"
+  printf '> ' > /dev/tty
+  IFS= read -r TOKEN < /dev/tty || TOKEN=""
+  TOKEN="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"
+  if [ -n "$TOKEN" ] && [[ ! "$TOKEN" =~ ^mb_[A-Za-z0-9_-]+$ ]]; then
+    fail "That does not look like an invite code (it starts with mb_). Check that you pasted all of it."
+  fi
+fi
+if [ "$CODE_ROUTE" = 1 ] && [ -n "$TOKEN" ]; then
+  PASS_RC=0; source_pass_request "$TOKEN" || PASS_RC=$?
+  if [ "$PASS_RC" = 0 ]; then
+    ok "Invite code accepted"
+  elif [ "$PASS_RC" = 1 ] && [ ! -d "$WORKSPACE/.git" ]; then
+    fail "${SOURCE_PASS_SAID:-The hub did not accept this invite code.}"
+  else
+    # The hub could not be asked, or Maison is already on this Mac (a used code is expected then).
+    if [ ! -d "$WORKSPACE/.git" ]; then
+      warn "The hub could not give this Mac a pass to download Maison just now. If you were invited on"
+      warn "GitHub, sign in below. Otherwise run the same command again in a few minutes."
+    fi
+    CODE_ROUTE=0
+  fi
+else
+  CODE_ROUTE=0
+fi
+# A Mac that was installed with an invite code and has no pass this time (its code is used by now,
+# or the hub could not be asked) is not sent to GitHub: its owner may have no account there. It
+# carries on with the Maison it has, which updates itself every night with its own pass.
+PASS_NODE=0
+if [ "$CODE_ROUTE" != 1 ] && [ -d "$WORKSPACE/.git" ] && [ "$(git -C "$WORKSPACE" config --local --get maison.sourceAccess 2>/dev/null || true)" = pass ] \
+   && ! gh auth status >/dev/null 2>&1; then PASS_NODE=1; fi
+
+if [ "$CODE_ROUTE" = 1 ] || [ "$PASS_NODE" = 1 ]; then
+  :   # no GitHub account, sign-in or invitation: the pass is what reads the source
+elif gh auth status >/dev/null 2>&1; then
   ok "Signed in to GitHub"
 else
   have_tty || fail "GitHub sign-in needs this Terminal window."
@@ -185,10 +297,12 @@ else
   gh auth login --hostname github.com --git-protocol https --web < /dev/tty || fail "GitHub sign-in did not finish."
   ok "Signed in to GitHub"
 fi
+if [ "$CODE_ROUTE" != 1 ] && [ "$PASS_NODE" != 1 ]; then
 gh auth setup-git >/dev/null 2>&1 || true
 for id in $(gh api user/repository_invitations --jq ".[] | select(.repository.full_name == \"$UPSTREAM_REPO\") | .id" 2>/dev/null || true); do
   gh api -X PATCH "user/repository_invitations/$id" >/dev/null 2>&1 && ok "Accepted your invitation to $UPSTREAM_REPO"
 done
+fi
 
 # ─── 5. Download ────────────────────────────────────────────────────────────
 # Maison's latest commit is fetched straight from the Maison repo (not the checkout's own remote, which on
@@ -233,14 +347,23 @@ if [ -d "$WORKSPACE/.git" ]; then
   # REVERT_BEFORE_PULL, the same list the nightly updater reverts). Upstream changes them on every ship, so a
   # second run of this command after a first build could not fast-forward and silently kept the old code.
   for f in app/pnpm-lock.yaml app/package-lock.json scripts/package-lock.json app/src/lib/version.ts app/public/sw.js; do git checkout -- "$f" >/dev/null 2>&1 || true; done
-  GIT_TERMINAL_PROMPT=0 git pull --ff-only >/dev/null 2>&1 || true   # the checkout's own remote; the check below is what decides
+  [ "$CODE_ROUTE" = 1 ] || [ "$PASS_NODE" = 1 ] || GIT_TERMINAL_PROMPT=0 git pull --ff-only >/dev/null 2>&1 || true   # the checkout's own remote; the check below is what decides
   # 🩸 2026-09-14 (Oslo): a failed pull used to print a warning and carry on, so a friend asked to update
   # rebuilt the OLD code and nobody could tell. Now: behind the latest Maison and unable to catch up = stop.
-  if ! GIT_TERMINAL_PROMPT=0 git fetch --quiet "$UPSTREAM_HTTPS" HEAD 2>/dev/null; then
+  fetch_latest() {
+    if [ "$CODE_ROUTE" = 1 ]; then git_with_source_pass fetch --quiet "$UPSTREAM_HTTPS" HEAD 2>/dev/null
+    else GIT_TERMINAL_PROMPT=0 git fetch --quiet "$UPSTREAM_HTTPS" HEAD 2>/dev/null; fi
+  }
+  if [ "$PASS_NODE" = 1 ]; then
+    ok "Continuing with the Maison already on this Mac (it updates itself every night)"
+  elif ! fetch_latest; then
     warn "Could not check GitHub for updates (offline, or this GitHub account has not been invited to"
     warn "the current Maison source). Continuing, but this copy of Maison may be out of date."
   else
     LATEST="$(git rev-parse FETCH_HEAD)"
+    # Fetched with a pass: the nightly update goes the same way. (An install stopped between its
+    # download and this note would otherwise be left with no way to update.)
+    [ "$CODE_ROUTE" != 1 ] || git config maison.sourceAccess pass
     # 🩸 2026-10-06: Maison's source moved to another repository, with a history that starts over.
     # A Mac installed before the move shares no commit with it. This used to read as "this Mac has
     # its own saved commits" and tell the owner to `git reset --hard` onto the new history: a jump
@@ -266,9 +389,19 @@ if [ -d "$WORKSPACE/.git" ]; then
 else
   mkdir -p "$(dirname "$WORKSPACE")"
   say "Downloading Maison to $WORKSPACE…"
+  if [ "$CODE_ROUTE" = 1 ]; then
+    git_with_source_pass clone "$UPSTREAM_HTTPS" "$WORKSPACE" \
+      || fail "Could not download Maison with your invite code. Check your internet connection. If it keeps failing, send this message to whoever invited you."
+    # A note for the nightly update, in this download's own settings: this Mac reads the source
+    # with a pass from the hub, not a GitHub account. It names the route; it is not the pass.
+    git -C "$WORKSPACE" config maison.sourceAccess pass
+  else
   git clone "$UPSTREAM_HTTPS" "$WORKSPACE" \
     || fail "Could not download Maison. If you just accepted your GitHub invitation, wait a minute. Otherwise ask whoever invited you to check that your GitHub account was invited."
+  fi
 fi
+# The pass has done its one job. This shell forgets it before anything else runs.
+SOURCE_PASS=""; unset SOURCE_PASS
 [ -f "$WORKSPACE/install.sh" ] || fail "The download at $WORKSPACE has no install.sh."
 ok "Maison is at $(git -C "$WORKSPACE" rev-parse --short HEAD)"
 
