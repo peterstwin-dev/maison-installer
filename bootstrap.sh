@@ -145,6 +145,82 @@ git_with_source_pass() {
     GIT_CONFIG_KEY_3=core.hooksPath GIT_CONFIG_VALUE_3=/dev/null \
     git "$@"
 }
+# 🩸 WHAT A MAC INSTALLS IS THE CHECKED RELEASE, NEVER MAIN (2026-10-07). Work reaches the source's
+# main as soon as the Mac that wrote it has checked it; GitHub's own check runs later, and the
+# commit it passed on is the branch `release`. The nightly updater follows release
+# (scripts/collective/update-source.ts). So does every door of the installers: a fresh download
+# stands on release, and a second run catches up to release. A source with no release yet installs
+# nothing; nothing here falls back to main.
+CHECKED_LINE="release"
+# 🩸 A DOWNLOAD HOLDS THE CHECKED RELEASE AND NOTHING ELSE (2026-10-31). A plain clone brought
+# every commit the source ever had and every branch on it (work in progress, release candidates)
+# to the Mac of someone who was only invited to run Maison. Every door downloads the release's
+# newest commit alone: no history, no other branch, no tag but one on that commit. The nightly
+# update brings each new release on top of it and fetches only the signature tags of commits the
+# download holds (scripts/collective/release-tags.ts); a download made before this keeps all it has.
+# clone_release <git command> <address> <dir>: the command is git, or git_with_source_pass. A
+# source with no release yet is said as that (no_release_yet), not as a download that failed: a
+# clone of one branch stops on a branch that is not there, where a plain clone brought main. git
+# says it in English (LC_ALL=C), so the words are found on a Mac set to any language. A copy that is
+# not the source (a fork) may lack the branch while the source has it: RELEASE_MAY_BE_ELSEWHERE=1
+# leaves that to the caller.
+clone_release() {
+  local said rc=0
+  said="$(LC_ALL=C "$1" clone --depth 1 --single-branch --branch "$CHECKED_LINE" "$2" "$3" 2>&1)" || rc=$?
+  [ -z "$said" ] || printf '%s\n' "$said" >&2
+  [ "$rc" = 0 ] && return 0
+  [ -n "${RELEASE_MAY_BE_ELSEWHERE:-}" ] || case "$said" in *"branch $CHECKED_LINE not found"*) no_release_yet "$3" ;; esac
+  return "$rc"
+}
+# fresh_download_on_release <dir>: put a download made a moment ago on the release its clone
+# already brought (no second trip to the source: a pass is spent by the first). The branch keeps
+# the name main, which every tool in the download expects. Fails when the clone brought no release.
+fresh_download_on_release() {
+  local dir="$1" r rel=""
+  for r in upstream origin; do
+    rel="$(git -C "$dir" rev-parse -q --verify "refs/remotes/$r/$CHECKED_LINE^{commit}" 2>/dev/null)" || rel=""
+    [ -z "$rel" ] || break
+  done
+  [ -n "$rel" ] || return 1
+  git -C "$dir" checkout -q -B main "$rel" >/dev/null 2>&1 || return 1
+  git -C "$dir" branch -q --set-upstream-to="$r/$CHECKED_LINE" main >/dev/null 2>&1 || true
+  # The clone's own copy of the release branch: main is the one branch a download keeps.
+  git -C "$dir" branch -q -D "$CHECKED_LINE" >/dev/null 2>&1 || true
+  [ "$(git -C "$dir" rev-parse HEAD 2>/dev/null)" = "$rel" ]
+}
+# 🩸 A DOWNLOAD THAT IS ALREADY HERE AND WAS NEVER BUILT (a second independent reader, 2026-10-07).
+# A clone stands on the source's main until fresh_download_on_release moves it. An install stopped
+# in between, a download made by hand, or one made by an older copy of the bootstrap leaves main's
+# newest commit on disk, and "is the release part of what is here?" answers yes for it: the second
+# run said "Up to date" and built work GitHub had not checked. Nothing of a download that was never
+# built has run, so it loses nothing by being put on the release.
+# unbuilt_download_on_release <dir> [<release commit>]: 0 when the download was built before (a
+# running Mac is never taken back to older code here), or holds nothing of the source's past the
+# release, or was put on the release now. 1 when it was never built, holds the source's unchecked
+# commits, and could not be put on the release (no release known, or this Mac's own commits sit on
+# top). With no commit given it reads the release the download's own fetches brought.
+unbuilt_download_on_release() {
+  local dir="$1" rel="${2:-}" r head past own
+  [ ! -f "$dir/app/.next/BUILD_ID" ] || return 0
+  if [ -z "$rel" ]; then
+    for r in upstream origin; do
+      rel="$(git -C "$dir" rev-parse -q --verify "refs/remotes/$r/$CHECKED_LINE^{commit}" 2>/dev/null)" || rel=""
+      [ -z "$rel" ] || break
+    done
+  fi
+  [ -n "$rel" ] || return 1
+  head="$(git -C "$dir" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" || return 1
+  # Another history altogether (a Mac from before the source moved): not this guard's case.
+  [ -n "$(git -C "$dir" merge-base "$head" "$rel" 2>/dev/null)" ] || return 0
+  past="$(git -C "$dir" rev-list --count "$rel..$head" 2>/dev/null)" || return 1
+  own="$(git -C "$dir" rev-list --count "$head" --not "$rel" --remotes 2>/dev/null)" || return 1
+  # On the release, behind it, or only this Mac's own commits on it: nothing unchecked of the source's.
+  [ "$past" != "$own" ] || return 0
+  # The source's unchecked commits with this Mac's own on top: nothing here can untangle that.
+  [ "$own" = 0 ] || return 1
+  git -C "$dir" checkout -q -B main "$rel" >/dev/null 2>&1 || return 1
+  [ "$(git -C "$dir" rev-parse HEAD 2>/dev/null)" = "$rel" ]
+}
 # <<< source-pass
 
 cleanup() { if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; }
@@ -339,6 +415,18 @@ stale_download() {
   fail "Maison did not update."
 }
 
+no_release_yet() {
+  # The download is main's newest commit, which GitHub may not have checked. It must not be run.
+  [ -n "$WORKSPACE" ] && [ -d "$WORKSPACE/.git" ] && rm -rf "$WORKSPACE"
+  fail "Maison's source has no checked release to install yet. Nothing was installed. Send this message to whoever invited you; they can make one in a few minutes."
+}
+
+unchecked_download() {
+  # Already here, never built, and holding work GitHub has not checked. Nothing is deleted: the
+  # folder may hold someone's own commits.
+  fail "The Maison download at $WORKSPACE holds work that has not been checked yet, and it could not be put on the checked release. Nothing was built. Move that folder aside (or delete it) and run this again."
+}
+
 if [ -d "$WORKSPACE/.git" ]; then
   ok "Maison is already downloaded at $WORKSPACE. Checking for updates…"
   cd "$WORKSPACE"
@@ -347,20 +435,25 @@ if [ -d "$WORKSPACE/.git" ]; then
   # REVERT_BEFORE_PULL, the same list the nightly updater reverts). Upstream changes them on every ship, so a
   # second run of this command after a first build could not fast-forward and silently kept the old code.
   for f in app/pnpm-lock.yaml app/package-lock.json scripts/package-lock.json app/src/lib/version.ts app/public/sw.js; do git checkout -- "$f" >/dev/null 2>&1 || true; done
-  [ "$CODE_ROUTE" = 1 ] || [ "$PASS_NODE" = 1 ] || GIT_TERMINAL_PROMPT=0 git pull --ff-only >/dev/null 2>&1 || true   # the checkout's own remote; the check below is what decides
+  # 🩸 2026-10-07: no bare `git pull` here any more. This checkout's branch may follow the source's
+  # main, which holds work GitHub has not checked yet; a pull would install it. The fetch below
+  # asks for the checked release by name, and is the only thing that moves this download.
   # 🩸 2026-09-14 (Oslo): a failed pull used to print a warning and carry on, so a friend asked to update
   # rebuilt the OLD code and nobody could tell. Now: behind the latest Maison and unable to catch up = stop.
   fetch_latest() {
-    if [ "$CODE_ROUTE" = 1 ]; then git_with_source_pass fetch --quiet "$UPSTREAM_HTTPS" HEAD 2>/dev/null
-    else GIT_TERMINAL_PROMPT=0 git fetch --quiet "$UPSTREAM_HTTPS" HEAD 2>/dev/null; fi
+    if [ "$CODE_ROUTE" = 1 ]; then git_with_source_pass fetch --quiet "$UPSTREAM_HTTPS" "refs/heads/$CHECKED_LINE" 2>/dev/null
+    else GIT_TERMINAL_PROMPT=0 git fetch --quiet "$UPSTREAM_HTTPS" "refs/heads/$CHECKED_LINE" 2>/dev/null; fi
   }
   if [ "$PASS_NODE" = 1 ]; then
+    unbuilt_download_on_release "$WORKSPACE" || unchecked_download
     ok "Continuing with the Maison already on this Mac (it updates itself every night)"
   elif ! fetch_latest; then
+    unbuilt_download_on_release "$WORKSPACE" || unchecked_download
     warn "Could not check GitHub for updates (offline, or this GitHub account has not been invited to"
     warn "the current Maison source). Continuing, but this copy of Maison may be out of date."
   else
     LATEST="$(git rev-parse FETCH_HEAD)"
+    unbuilt_download_on_release "$WORKSPACE" "$LATEST" || unchecked_download
     # Fetched with a pass: the nightly update goes the same way. (An install stopped between its
     # download and this note would otherwise be left with no way to update.)
     [ "$CODE_ROUTE" != 1 ] || git config maison.sourceAccess pass
@@ -390,15 +483,16 @@ else
   mkdir -p "$(dirname "$WORKSPACE")"
   say "Downloading Maison to $WORKSPACE…"
   if [ "$CODE_ROUTE" = 1 ]; then
-    git_with_source_pass clone "$UPSTREAM_HTTPS" "$WORKSPACE" \
+    clone_release git_with_source_pass "$UPSTREAM_HTTPS" "$WORKSPACE" \
       || fail "Could not download Maison with your invite code. Check your internet connection. If it keeps failing, send this message to whoever invited you."
     # A note for the nightly update, in this download's own settings: this Mac reads the source
     # with a pass from the hub, not a GitHub account. It names the route; it is not the pass.
     git -C "$WORKSPACE" config maison.sourceAccess pass
   else
-  git clone "$UPSTREAM_HTTPS" "$WORKSPACE" \
+  clone_release git "$UPSTREAM_HTTPS" "$WORKSPACE" \
     || fail "Could not download Maison. If you just accepted your GitHub invitation, wait a minute. Otherwise ask whoever invited you to check that your GitHub account was invited."
   fi
+  fresh_download_on_release "$WORKSPACE" || no_release_yet
 fi
 # The pass has done its one job. This shell forgets it before anything else runs.
 SOURCE_PASS=""; unset SOURCE_PASS
