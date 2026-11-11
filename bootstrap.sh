@@ -33,11 +33,21 @@
 
 set -eo pipefail
 
+# 🩸 GIT NEVER ASKS FOR A GITHUB SIGN-IN HERE (2026-11-01): a Mac with an invite code has no GitHub
+# account, and a prompt for one stands the install still. Same rule and reason as install.sh.
+export GIT_TERMINAL_PROMPT=0
+
 # The source repository. Written out because this file is published on its own and runs before
 # there is a checkout; scripts/test/source-repo-one-place.test.sh fails if it differs from
 # config/source-repo.txt. Change it with: bash scripts/ops/set-source-repo.sh <owner/name>
 UPSTREAM_REPO="Maison-Initiative/maison-source"
 UPSTREAM_HTTPS="https://github.com/${UPSTREAM_REPO}.git"
+# The scrambled download line's OWN private repository (the "unreadable downloadable build",
+# 2026-11-05). A paid self-host node told to follow the download line reads ONLY this repository,
+# never the readable source above. Written out for the same reason: this file is published on its own
+# and runs before there is a checkout; scripts/test/download-repo-one-place.test.sh fails if it
+# differs from config/download-repo.txt.
+DOWNLOAD_REPO="Maison-Initiative/maison-download"
 WORKSPACE="${MAISON_WORKSPACE:-$HOME/Workspace/maison-simple}"
 RESUME='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/peterstwin-dev/maison-installer/main/bootstrap.sh)"'
 
@@ -94,6 +104,7 @@ unset MAISON_BOOTSTRAP_TOKEN
 SOURCE_PASS_HUB="${MAISON_MOTHERSHIP_URL:-https://rotovbkrljkumnveyvav.supabase.co}"
 SOURCE_PASS=""        # the pass, in this shell's memory only: never exported
 SOURCE_PASS_SAID=""   # the hub's own words when it says no
+SOURCE_PASS_CODE=""   # and its one-word reason (wrong_repository: this key reads the other line)
 
 source_pass_available() {
   local said
@@ -104,9 +115,31 @@ source_pass_available() {
 
 # source_pass_request <invite code>: 0 = SOURCE_PASS is set; 1 = the hub said no (SOURCE_PASS_SAID
 # has its words); 2 = the hub could not be asked, or its answer was not a pass for this repository.
+# 🩸 THE HUB SAYS WHICH LINE A KEY READS (2026-11-07). A key minted by the website (a paid own Mac,
+# Early Access) is a download key: the hub gives it a pass for the scrambled download repository
+# only, and refuses the readable source with `wrong_repository`. Nothing on this Mac knows which kind
+# of key it holds, so it asks for the source first and, refused that way, asks once for the download
+# line. Only when the hub hands over a download pass does this install follow the download line, and
+# MAISON_UPDATE_LINE=download goes to the rest of the install, which writes updates.line=download
+# (set-update-line.ts) so the nightly update keeps asking for the download repository. A friend's
+# key, given the source, never asks the second time and stays on the readable release.
 source_pass_request() {
+  local rc=0 said_first
+  source_pass_ask "$1" || rc=$?
+  [ "$rc" = 1 ] && [ "$SOURCE_PASS_CODE" = wrong_repository ] && [ -n "${DOWNLOAD_REPO:-}" ] && [ "$UPSTREAM_REPO" != "$DOWNLOAD_REPO" ] || return "$rc"
+  said_first="$SOURCE_PASS_SAID"; rc=0
+  follow_line download
+  source_pass_ask "$1" || rc=$?
+  if [ "$rc" = 0 ]; then export MAISON_UPDATE_LINE=download; return 0; fi
+  follow_line release
+  # Refused the download line as well: the key reads neither, and the hub's first words say so. Any
+  # other answer (the hub could not be asked, too many tries) is the second ask's own.
+  if [ "$rc" = 1 ] && [ "$SOURCE_PASS_CODE" = wrong_repository ]; then SOURCE_PASS_SAID="$said_first"; fi
+  return "$rc"
+}
+source_pass_ask() {
   local code="$1" said status body
-  SOURCE_PASS=""; SOURCE_PASS_SAID=""
+  SOURCE_PASS=""; SOURCE_PASS_SAID=""; SOURCE_PASS_CODE=""
   # The code reaches curl on its standard input, as a settings line, so it is on no command line.
   said="$(printf 'header = "Authorization: Bearer %s"\n' "$code" | curl -sS --max-time 30 -K - \
     -H 'Content-Type: application/json' -d "{\"mode\":\"install\",\"repo\":\"$UPSTREAM_REPO\"}" \
@@ -124,7 +157,8 @@ source_pass_request() {
     return 2
   fi
   case "$status" in
-    401|403|409|429) SOURCE_PASS_SAID="$(printf '%s' "$body" | sed -n 's/.*"error":"\([^"\\]*\)".*/\1/p')"; return 1 ;;
+    401|403|409|429) SOURCE_PASS_SAID="$(printf '%s' "$body" | sed -n 's/.*"error":"\([^"\\]*\)".*/\1/p')"
+      SOURCE_PASS_CODE="$(printf '%s' "$body" | sed -n 's/.*"code":"\([a-z_]*\)".*/\1/p')"; return 1 ;;
   esac
   return 2
 }
@@ -152,6 +186,34 @@ git_with_source_pass() {
 # stands on release, and a second run catches up to release. A source with no release yet installs
 # nothing; nothing here falls back to main.
 CHECKED_LINE="release"
+# 🩓 THE DOWNLOAD LINE LIVES IN ITS OWN REPOSITORY (2026-11-05). Told to follow the scrambled
+# "download" line (MAISON_UPDATE_LINE=download, the paid self-host path), the install clones, fetches
+# and asks the hub for a pass to the download repository on its own download branch, never the
+# readable source. The hub decides from its OWN record of this install whether it may have a
+# maison-download pass; naming the repository here only says which one the install asks about, and a
+# request for maison-source from a download install is refused anyway. With the switch unset this is
+# inert and the install is the readable release, as every node is.
+# follow_line <download|release>: the repository and branch every door below reads. source_pass_request
+# also calls it, when the hub says this install's key is a download key.
+follow_line() {
+  if [ "$1" = download ]; then UPSTREAM_REPO="$DOWNLOAD_REPO"; CHECKED_LINE="download"
+  else UPSTREAM_REPO="$SOURCE_REPO"; CHECKED_LINE="release"; fi
+  UPSTREAM_GIT="git@github.com:${UPSTREAM_REPO}"
+  UPSTREAM_HTTPS="https://github.com/${UPSTREAM_REPO}.git"
+}
+SOURCE_REPO="${UPSTREAM_REPO:-}"
+[ "${MAISON_UPDATE_LINE:-}" != download ] || follow_line download
+# follow_line_of <dir>: a download already on this Mac keeps its line on a second run, when its key is
+# spent and the hub is not asked again. Every snapshot of the download line names the download
+# repository as its own (config/source-repo.txt, written by scripts/release/publish-download-line.sh).
+follow_line_of() {
+  local names
+  [ -z "${MAISON_UPDATE_LINE:-}" ] && [ -n "${DOWNLOAD_REPO:-}" ] && [ -f "$1/config/source-repo.txt" ] || return 0
+  names="$(sed -n '/^[^#[:space:]]/{p;q;}' "$1/config/source-repo.txt" | tr -d '[:space:]' | tr 'A-Z' 'a-z')"
+  [ "$names" = "$(printf '%s' "$DOWNLOAD_REPO" | tr 'A-Z' 'a-z')" ] || return 0
+  follow_line download
+  export MAISON_UPDATE_LINE=download
+}
 # 🩸 A DOWNLOAD HOLDS THE CHECKED RELEASE AND NOTHING ELSE (2026-10-31). A plain clone brought
 # every commit the source ever had and every branch on it (work in progress, release candidates)
 # to the Mac of someone who was only invited to run Maison. Every door downloads the release's
@@ -222,6 +284,7 @@ unbuilt_download_on_release() {
   [ "$(git -C "$dir" rev-parse HEAD 2>/dev/null)" = "$rel" ]
 }
 # <<< source-pass
+follow_line_of "$WORKSPACE"
 
 cleanup() { if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; }
 trap cleanup EXIT
